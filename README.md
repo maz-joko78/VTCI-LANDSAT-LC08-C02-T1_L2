@@ -1,61 +1,178 @@
-# VTCI-LANDSAT-LC08-C02-T1_L2
-This repository contains a Google Colab notebook for calculating and visualizing the Vegetation Temperature Condition Index (VTCI) using Landsat 8 Level-2 data via Google Earth Engine (GEE) Python API. The VTCI is a remote sensing-based drought index that combines NDVI and LST to monitor agricultural drought.
-Terima kasih, berikut deskripsi repository GitHub yang disesuaikan dengan akun kamu `maz-joko78` dan penggunaan **Google Colab** untuk analisis **VTCI (Vegetation Temperature Condition Index)**:
+pip install numpy rasterio matplotlib
+import numpy as np
+import rasterio
+import matplotlib.pyplot as plt
+from sklearn.linear_model import LinearRegression
+import os
 
----
+# Mount Google Drive to access the files
+from google.colab import drive
+drive.mount('/content/drive')
 
-## 📗 VTCI Drought Analysis with Google Colab & Earth Engine
+# =============================
+# 1. Load LST dan NDVI
+# =============================
+lst_path = '/content/drive/MyDrive/1 LST_Matlab/LST_Lombok.tif'  # Verify this path is correct after mounting Google Drive.
+ndvi_path = '/content/drive/MyDrive/1 LST_Matlab/NDVI_Lombok.tif'  # Verify this path is correct after mounting Google Drive.
 
-**Repository Name**: `vtci-drought-colab`
-**Author**: [maz-joko78](https://github.com/maz-joko78)
+with rasterio.open(lst_path) as src:
+    lst = src.read(1)
+    lst_meta = src.meta
 
-### 📌 Description
+with rasterio.open(ndvi_path) as src:
+    ndvi = src.read(1)
 
-This repository contains a **Google Colab notebook** for calculating and visualizing the **Vegetation Temperature Condition Index (VTCI)** using **Landsat 8 Level-2 data** via **Google Earth Engine (GEE) Python API**. The VTCI is a remote sensing-based drought index that combines **NDVI** and **LST** to monitor agricultural drought.
+# Calculate max and min values using the loaded 'lst' and 'ndvi' variables
+lst_max_value = np.nanmax(lst)
+lst_min_value = np.nanmin(lst)
 
-### 🚀 Key Features
+print(f"Nilai maksimum LST: {lst_max_value:.2f}")
+print(f"Nilai minimum LST: {lst_min_value:.2f}")
 
-* 🛰️ Uses **Landsat 8 Collection 2, Tier 1, Level-2** surface reflectance & temperature data
-* 🧾 Cloud masking via **QA\_PIXEL** bits
-* 📊 Calculates **NDVI**, **LST**, and **VTCI**
-* 🎯 VTCI defined as:
+ndvi_max_value = np.nanmax(ndvi)
+ndvi_min_value = np.nanmin(ndvi)
 
-  $$
-  \text{VTCI} = \frac{LST_{\text{max}} - LST}{LST_{\text{max}} - LST_{\text{min}}}
-  $$
+print(f"Nilai maksimum NDVI: {ndvi_max_value:.2f}")
+print(f"Nilai minimum NDVI: {ndvi_min_value:.2f}")
 
-  where:
+# =============================
+# 2. Mask NaN atau nilai no-data
+# =============================
+mask = np.logical_and(~np.isnan(lst), ~np.isnan(ndvi))
+lst = lst[mask]
+ndvi = ndvi[mask]
 
-  * **VTCI = 1** → wet condition
-  * **VTCI = 0** → dry condition
-* 🌍 Region of interest (AOI): Customizable (e.g., Mataram, Lombok)
-* 📈 NDVI vs LST scatter plot with warm & cold edge regression (optionally visualized using matplotlib or chart libraries)
+# =============================
+# 3. Binning NDVI dan filter outlier LST
+# =============================
+bin_edges = np.arange(0, 1.01, 0.02)
+bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
 
-### 📁 Repository Structure
+lst_filtered = []
+ndvi_filtered = []
 
-```
-vtci-drought-colab/
-├── vtci_analysis.ipynb         # Main Google Colab notebook
-├── README.md                   # Project description
-├── img/                        # Optional images for documentation
-└── requirements.txt            # Python package dependencies (GEE, folium, etc.)
-```
+for i in range(len(bin_edges) - 1):
+    bin_mask = np.logical_and(ndvi >= bin_edges[i], ndvi < bin_edges[i+1])
+    lst_bin = lst[bin_mask]
+    ndvi_bin = ndvi[bin_mask]
 
-### 🧰 Requirements
+    if len(lst_bin) > 10:
+        median = np.median(lst_bin)
+        std = np.std(lst_bin)
+        lower = median - 3.0 * std
+        upper = median + 3.0 * std
+        inlier_mask = np.logical_and(lst_bin >= lower, lst_bin <= upper)
 
-* Google Colab (or Jupyter Notebook)
-* Earth Engine Python API
-* geemap / folium (for mapping)
-* matplotlib / seaborn (optional for charts)
+        lst_filtered.append(lst_bin[inlier_mask])
+        ndvi_filtered.append(ndvi_bin[inlier_mask])
 
-### 📚 References
+lst_filtered = np.concatenate(lst_filtered)
+ndvi_filtered = np.concatenate(ndvi_filtered)
 
-* Wang et al. (2001). *A new method for drought monitoring: VTCI*
-* Patel et al. (2011). *Assessment of agricultural drought using VTCI*
-* Tang et al. (2010). *LST-NDVI Space Analysis*
+# =============================
+# 4. Regressi Warm dan Cold Edge
+# =============================
+max_lst_per_bin = []
+min_lst_per_bin = []
+valid_bin = []
 
-### 🧑‍💻 Author
+for i in range(len(bin_edges) - 1):
+    bin_mask = np.logical_and(ndvi_filtered >= bin_edges[i], ndvi_filtered < bin_edges[i+1])
+    lst_bin = lst_filtered[bin_mask]
+    if len(lst_bin) > 0:
+        max_lst_per_bin.append(np.max(lst_bin))
+        min_lst_per_bin.append(np.min(lst_bin))
+        valid_bin.append(bin_centers[i])
 
-Repository developed and maintained by **[@maz-joko78](https://github.com/maz-joko78)** for drought monitoring research and educational purposes.
+valid_bin = np.array(valid_bin).reshape(-1, 1)
+
+warm_model = LinearRegression().fit(valid_bin, max_lst_per_bin)
+cold_model = LinearRegression().fit(valid_bin, min_lst_per_bin)
+
+warm_a, warm_b = warm_model.coef_[0], warm_model.intercept_
+cold_a, cold_b = cold_model.coef_[0], cold_model.intercept_
+
+print(f"Warm edge (LSTmax): LST = {warm_a:.4f} * NDVI + {warm_b:.4f}")
+print(f"Cold edge (LSTmin): LST = {cold_a:.4f} * NDVI + {cold_b:.4f}")
+
+# =============================
+# 5. Hitung VTCI
+# =============================
+# Reload the full rasters for VTCI calculation
+with rasterio.open(lst_path) as src:
+    lst_full = src.read(1)
+with rasterio.open(ndvi_path) as src:
+    ndvi_full = src.read(1)
 
 
+lst_max = warm_a * ndvi_full + warm_b
+lst_min = cold_a * ndvi_full + cold_b
+
+# Ganti NaN dengan 0
+lst_full = np.nan_to_num(lst_full, nan=0)
+ndvi_full = np.nan_to_num(ndvi_full, nan=0)
+lst_max = np.nan_to_num(lst_max, nan=0)
+lst_min = np.nan_to_num(lst_min, nan=0)
+
+# Hindari pembagian dengan nol
+denominator = lst_max - lst_min
+denominator[denominator == 0] = 1e-10 # Ganti 0 dengan nilai kecil
+
+vtci = (lst_max - lst_full) / denominator
+vtci = np.clip(vtci, 0, 1)
+
+# =============================
+# 6. Visualisasi dengan Masking
+# =============================
+
+# 1. Buat mask berdasarkan data yang valid (non-NaN)
+with rasterio.open(lst_path) as src:
+    lst_full_viz = src.read(1) # Use a separate variable for visualization
+    # Asumsikan nilai NoData adalah NaN
+    mask = ~np.isnan(lst_full_viz)
+
+# 2. Terapkan mask pada visualisasi
+plt.figure(figsize=(15, 4))
+
+plt.subplot(1, 3, 1)
+# Use masked array to apply the mask
+masked_lst = np.ma.masked_array(lst_full_viz, ~mask)  # Mask invalid data
+plt.imshow(masked_lst, cmap='inferno')
+plt.title('LST')
+plt.colorbar()
+
+plt.subplot(1, 3, 2)
+# Use masked array to apply the mask
+masked_vtci = np.ma.masked_array(vtci, ~mask)  # Mask invalid data
+plt.imshow(masked_vtci, cmap='RdYlGn')
+plt.title('VTCI')
+plt.colorbar()
+
+plt.subplot(1, 3, 3)
+# Need to reload ndvi_full for visualization after potential modifications
+with rasterio.open(ndvi_path) as src:
+    ndvi_full_viz = src.read(1)
+# Use masked array to apply the mask
+masked_ndvi = np.ma.masked_array(ndvi_full_viz, ~mask)  # Mask invalid data (using LST mask for consistency, assuming the masks are the same)
+plt.imshow(masked_ndvi, cmap='RdYlGn')
+plt.title('NDVI')
+plt.colorbar()
+
+plt.tight_layout()
+plt.show()
+
+
+# =============================
+# 7. Scatter Plot NDVI vs LST + Regresi
+# =============================
+plt.figure(figsize=(6, 6))
+plt.scatter(ndvi_filtered, lst_filtered, s=1, c='black', label='Sample')
+ndvi_line = np.linspace(0, 1.01, 100)
+plt.plot(ndvi_line, warm_a * ndvi_line + warm_b, 'r-', label='Warm edge')
+plt.plot(ndvi_line, cold_a * ndvi_line + cold_b, 'b-', label='Cold edge')
+plt.xlabel('NDVI')
+plt.ylabel('LST (°C)')
+plt.legend()
+plt.title('NDVI vs LST + Warm/Cold Edge')
+plt.grid(True)
+plt.show()
